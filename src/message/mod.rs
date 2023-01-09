@@ -1,4 +1,6 @@
-use std::fmt;
+use std::{fmt, collections::HashMap, hash::Hash};
+
+use once_cell::sync::OnceCell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageType
@@ -51,10 +53,14 @@ impl Message
             let mut message = Message::new();
             message.buf = buf;
 
-            match std::str::from_utf8(&message.buf[0..MSG_TYPE_MAX_LEN + 1]) // + 1 for the space
+            match std::str::from_utf8(&message.buf[0..MSG_TYPE_MAX_LEN]) // + 1 for the space
             {
-                Ok(msg_type) if matches!(msg_type, "BUF " | "CMD ") => {
-                    message.r#type = if msg_type == "CMD " { MessageType::CMD } else { MessageType::BUF };
+                Ok(str_msg_type) => if let Some(msg_type) = Self::get_message_type(str_msg_type)
+                {
+                    message.r#type = msg_type;
+
+                    // make sure we have space
+                    if message.buf[MSG_TYPE_MAX_LEN] != ' ' as u8 { return Err(ERROR_MSG) };
 
                     // check if there are options
                     match message.buf[MSG_TYPE_MAX_LEN + 1..].iter().position(|&ch| ch.is_ascii_whitespace())
@@ -71,7 +77,7 @@ impl Message
                     return Ok(message);
                 },
 
-                Ok(_) | Err(_) => return Err(ERROR_MSG)
+                Err(_) => return Err(ERROR_MSG)
             }
         }
 
@@ -92,6 +98,20 @@ impl Message
     {
         std::str::from_utf8(&self.buf[self.opts.0..self.opts.1]).unwrap()
     }
+
+    fn get_message_type(str_msg_type: &str) -> Option<MessageType>
+    {
+        static INSTANCE: OnceCell<HashMap<&str, MessageType>> = OnceCell::new();
+        let map = INSTANCE.get_or_init(|| {
+            HashMap::<&str, MessageType>::from_iter([
+                ("", MessageType::NONE),
+                ("BUF", MessageType::BUF),
+                ("CMD", MessageType::CMD),
+            ])
+        });
+
+        map.get(str_msg_type).and_then(|&v| Some(v))
+    }
 }
 
 //////////////////////////////////// tests ////////////////////////////////////
@@ -100,49 +120,50 @@ impl Message
 mod tests {
     use crate::message::{Message, MessageType};
 
-    #[test]
-    fn valid_buf() {
+    #[tokio::test]
+    async fn valid_buf() {
         let buf: Vec<u8> = "CMD /read/file /usr/share/file1".as_bytes().to_vec();
 
-        async {
-            let message = Message::from_buf(buf).await;
-            assert!(&message.is_ok());
-            assert_eq!(&message.as_ref().unwrap().r#type(), &MessageType::CMD);
-            assert_eq!(&message.as_ref().unwrap().body(), &"/read/file");
-            assert_eq!(&message.as_ref().unwrap().options(), &"/usr/share/file1");
-        };
+        let message = Message::from_buf(buf).await;
+        assert!(&message.is_ok());
+        assert_eq!(&message.as_ref().unwrap().r#type(), &MessageType::CMD);
+        assert_eq!(&message.as_ref().unwrap().body(), &"/read/file");
+        assert_eq!(&message.as_ref().unwrap().options(), &"/usr/share/file1");
     }
 
-    #[test]
-    fn valid_buf_with_opts() {
+    #[tokio::test]
+    async fn valid_buf_with_opts() {
         let buf: Vec<u8> = "CMD /read/file".as_bytes().to_vec();
 
-        async {
-            let message = Message::from_buf(buf).await;
-            assert!(&message.is_ok());
-            assert_eq!(&message.as_ref().unwrap().r#type(), &MessageType::CMD);
-            assert_eq!(&message.as_ref().unwrap().body(), &"/read/file");
-            assert_eq!(&message.as_ref().unwrap().options(), &"");
-        };
+        let message = Message::from_buf(buf).await;
+        assert!(&message.is_ok());
+        assert_eq!(&message.as_ref().unwrap().r#type(), &MessageType::CMD);
+        assert_eq!(&message.as_ref().unwrap().body(), &"/read/file");
+        assert_eq!(&message.as_ref().unwrap().options(), &"");
     }
 
-    #[test]
-    fn invalid_type() {
+    #[tokio::test]
+    async fn invalid_type() {
         let buf: Vec<u8> = "CM /read/file /usr/share/file1".as_bytes().to_vec();
 
-        async {
-            let message = Message::from_buf(buf).await;
-            assert!(&message.is_err());
-        };
+        let message = Message::from_buf(buf).await;
+        assert!(&message.is_err());
     }
     
-    #[test]
-    fn invalid_type2() {
+    #[tokio::test]
+    async fn invalid_type2() {
         let buf: Vec<u8> = "CMDD /read/file /usr/share/file1".as_bytes().to_vec();
 
-        async {
-            let message = Message::from_buf(buf).await;
-            assert!(&message.is_err());
-        };
+        let message = Message::from_buf(buf).await;
+        assert!(&message.is_err());
+    }
+
+    #[test]
+    fn test_message_type()
+    {
+        println!("{}", Message::get_message_type("").unwrap());
+        // println!("{}", Message::get_message_type("NONE").unwrap());
+        println!("{}", Message::get_message_type("BUF").unwrap());
+        println!("{}", Message::get_message_type("CMD").unwrap());
     }
 }
